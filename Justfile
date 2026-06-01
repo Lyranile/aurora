@@ -1,24 +1,30 @@
 export repo_organization := env("GITHUB_REPOSITORY_OWNER", "ublue-os")
 export base_image_org := env("BASE_IMAGE_ORG", "quay.io/fedora-ostree-desktops")
 export base_image_name := env("BASE_IMAGE_NAME", "kinoite")
+
 export common_image := env("COMMON_IMAGE", "ghcr.io/get-aurora-dev/common:latest")
 export brew_image := env("BREW_IMAGE", "ghcr.io/ublue-os/brew:latest")
+
 stable_version := "44"
 latest_version := "44"
 testing_version := "44"
+
 images := '(
     [aurora]=aurora
     [aurora-dx]=aurora-dx
 )'
+
 flavors := '(
     [main]=main
     [nvidia-open]=nvidia-open
 )'
+
 tags := '(
     [stable]=stable
     [latest]=latest
     [testing]=testing
 )'
+
 export SUDO_DISPLAY := if `if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then echo true; fi` == "true" { "true" } else { "false" }
 export SUDOIF := if `id -u` == "0" { "" } else { "sudo" }
 export PODMAN := if path_exists("/usr/bin/podman") == "true" { env("PODMAN", "/usr/bin/podman") } else if path_exists("/usr/bin/docker") == "true" { env("PODMAN", "docker") } else { env("PODMAN", "exit 1 ; ") }
@@ -34,22 +40,22 @@ default:
 check:
     #!/usr/bin/bash
     find . -type f -name "*.just" | while read -r file; do
-    	echo "Checking syntax: $file"
-    	{{ just }} --unstable --fmt --check -f $file
+      echo "Checking syntax: $file"
+      {{ just }} --fmt --check -f $file
     done
     echo "Checking syntax: Justfile"
-    {{ just }} --unstable --fmt --check -f Justfile
+    {{ just }} --fmt --check -f Justfile
 
 # Fix Just Syntax
 [group('Just')]
 fix:
     #!/usr/bin/bash
     find . -type f -name "*.just" | while read -r file; do
-    	echo "Checking syntax: $file"
-    	{{ just }} --unstable --fmt -f $file
+      echo "Checking syntax: $file"
+      {{ just }} --fmt -f $file
     done
     echo "Checking syntax: Justfile"
-    {{ just }} --unstable --fmt -f Justfile || { exit 1; }
+    {{ just }} --fmt -f Justfile || { exit 1; }
 
 # Clean Repo
 [group('Utility')]
@@ -59,6 +65,7 @@ clean:
     rm -f changelog.md
     rm -f output.env
     rm -rf sbom_out
+    rm -f /tmp/aurora*-tags.json
 
 # Check if valid combo
 [group('Utility')]
@@ -143,22 +150,15 @@ build $image="aurora" $tag="latest" $flavor="main" rechunk="0" ghcr="0" pipeline
     {{ just }} verify-container cosign.pub "ghcr.io/ublue-os/brew:latest@${brew_image_sha}"
 
     # Get Version
+    TIMESTAMP="$(date +%Y%m%d)"
     if [[ "${tag}" =~ stable ]]; then
-        ver="${fedora_version}.$(date +%Y%m%d)"
+        ver="${fedora_version}.${TIMESTAMP}"
     else
-        ver="${tag}-${fedora_version}.$(date +%Y%m%d)"
+        ver="${tag}-${fedora_version}.${TIMESTAMP}"
     fi
-    skopeo list-tags docker://ghcr.io/{{ repo_organization }}/${image_name} > /tmp/repotags.json
-    if [[ $(jq "any(.Tags[]; contains(\"$ver\"))" < /tmp/repotags.json) == "true" ]]; then
-        POINT="1"
-        while $(jq -e "any(.Tags[]; contains(\"$ver.$POINT\"))" < /tmp/repotags.json)
-        do
-            (( POINT++ ))
-        done
-    fi
-    if [[ -n "${POINT:-}" ]]; then
-        ver="${ver}.$POINT"
-    fi
+
+    POINT=$({{ just }} generate-point {{ image }} {{ tag }} {{ flavor }})
+    ver="${ver}.$POINT"
 
     # Build Arguments
     BUILD_ARGS=()
@@ -542,12 +542,12 @@ generate-build-tags image="aurora" tag="latest" flavor="main" kernel_pin="" ghcr
     FEDORA_VERSION="$({{ just }} fedora_version '{{ image }}' '{{ tag }}' '{{ flavor }}' '{{ kernel_pin }}')"
     IMAGE_NAME=$({{ just }} image_name {{ image }} {{ tag }} {{ flavor }})
 
+    TIMESTAMP="$(date +%Y%m%d)"
     if [[ -z "${version:-}" ]]; then
-        version="{{ tag }}-${FEDORA_VERSION}.$(date +%Y%m%d)"
+        version="{{ tag }}-${FEDORA_VERSION}.${TIMESTAMP}"
     fi
     version=${version#{{ tag }}-}
 
-    # Arrays for Tags
     BUILD_TAGS=()
     COMMIT_TAGS=()
 
@@ -559,21 +559,35 @@ generate-build-tags image="aurora" tag="latest" flavor="main" kernel_pin="" ghcr
         COMMIT_TAGS+=(${SHA_SHORT}-{{ tag }}-${version})
     fi
 
+    POINT=$({{ just }} generate-point {{ image }} {{ tag }} {{ flavor }})
+
     # These are always used regardless of the stream
     COMMON_TAGS=()
-    COMMON_TAGS+=("{{ tag }}" "{{ tag }}-${version}" "{{ tag }}-${version:3}")
+    COMMON_TAGS+=("{{ tag }}")
+    COMMON_TAGS+=("{{ tag }}-${version}")
+    COMMON_TAGS+=("{{ tag }}-${version:3}")
+    COMMON_TAGS+=("{{ tag }}-${version}.${POINT}")
+    COMMON_TAGS+=("{{ tag }}-${version:3}.${POINT}")
+
     BUILD_TAGS=("${COMMON_TAGS[@]}" "${BUILD_TAGS[@]}")
 
+    # No special handling here for testing for now
     if [[ "{{ tag }}" == stable ]]; then
       # Legacy Compatibility Tag so stable-daily points to stable, do not remove this
       # TODO: Move this to :latest after the ZFS removal to get daily updates again
-      BUILD_TAGS+=("{{ tag }}-daily" "${version}" "{{ tag }}-daily-${version}" "{{ tag }}-daily-${version:3}")
-
+      BUILD_TAGS+=("{{ tag }}-daily")
+      BUILD_TAGS+=("${version}")
+      BUILD_TAGS+=("{{ tag }}-daily-${version}")
+      BUILD_TAGS+=("{{ tag }}-daily-${version:3}")
+      BUILD_TAGS+=("{{ tag }}-daily-${version}.${POINT}")
+      BUILD_TAGS+=("{{ tag }}-daily-${version:3}.${POINT}")
     elif [[ "{{ tag }}" == latest ]]; then
       # We only want :$FEDORA_VERSION to point to :latest
-      BUILD_TAGS+=("{{ tag }}-${FEDORA_VERSION}" "${FEDORA_VERSION}-${version}" "${FEDORA_VERSION}-${version:3}")
-
-      # No special handling here for testing for now
+      BUILD_TAGS+=("{{ tag }}-${FEDORA_VERSION}")
+      BUILD_TAGS+=("${FEDORA_VERSION}-${version}")
+      BUILD_TAGS+=("${FEDORA_VERSION}-${version:3}")
+      BUILD_TAGS+=("${FEDORA_VERSION}-${version}.${POINT}")
+      BUILD_TAGS+=("${FEDORA_VERSION}-${version:3}.${POINT}")
     fi
 
     github_event="{{ github_event }}"
@@ -585,6 +599,38 @@ generate-build-tags image="aurora" tag="latest" flavor="main" kernel_pin="" ghcr
     fi
 
     echo "${alias_tags[*]}"
+
+# Get Index Point for multiple daily images
+[private]
+generate-point image="aurora" tag="latest" flavor="main":
+    #!/usr/bin/bash
+    set -eoux pipefail
+
+    IMAGE_NAME=$({{ just }} image_name {{ image }} {{ tag }} {{ flavor }})
+    TIMESTAMP="$(date +%Y%m%d)"
+
+    tags="/tmp/${IMAGE_NAME}-tags.json"
+
+    if [[ ! -f ${tags} ]]; then
+      skopeo list-tags docker://ghcr.io/{{ repo_organization }}/${IMAGE_NAME} > "${tags}"
+    fi
+
+    if [[ $(jq --arg tag "{{ tag }}" --arg timestamp "${TIMESTAMP}" 'any(.Tags[]; contains($tag + "-" + $timestamp))' < "${tags}") == "true" ]]; then
+
+      # our image already exists, so find the highest POINT
+      POINT=$(jq -r --arg tag "{{ tag }}" --arg timestamp "${TIMESTAMP}" \
+        '($tag + "-" + $timestamp) as $base | [ .Tags[] | select(startswith($base + ".")) ] | sort_by(split(".")[-1]
+        | tonumber)
+        |.[-1] | if . == null then "1" else split(".")[-1] end' < "${tags}")
+
+      ((POINT++))
+
+    else
+      # there is no image that exists for that day yet
+      POINT=1
+    fi
+
+    echo "${POINT}"
 
 # Tag Images
 [group('Utility')]
