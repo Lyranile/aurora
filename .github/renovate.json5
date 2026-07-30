@@ -61,6 +61,15 @@
       // to reach a stable release
       "matchBaseBranches": ["stable-f44"],
       "enabled": false
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "matchDepNames": [
+        "!oras-project/setup-oras",
+        "!sigstore/cosign-installer",
+        "!anchore/sbom-action"
+      ],
+      "schedule": ["on sunday"]
     }
   ]
 }

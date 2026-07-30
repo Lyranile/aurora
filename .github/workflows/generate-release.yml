@@ -31,8 +31,9 @@ jobs:
 
     steps:
       - name: Checkout last 500 commits (for <commits> to work)
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 500
           ref: stable-f44
 
@@ -47,23 +48,30 @@ jobs:
           just check
 
       - name: Install ORAS
-        uses: oras-project/setup-oras@38de303aac69abb66f3e6255b7198bff35f323e3 # v2.0.0
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
 
       - name: Generate Release Text
         id: generate-release-text
+        env:
+          MATRIX_VERSION: "${{ matrix.version }}"
+          HANDWRITTEN: "${{ inputs.handwritten }}"
         shell: bash
         run: |
-          just changelogs "${{ matrix.version }}" "${{ inputs.handwritten }}"
+          just changelogs "${MATRIX_VERSION}" "${HANDWRITTEN}"
           source ./output.env
           echo "title=${TITLE}" >> $GITHUB_OUTPUT
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
 
       - name: Create Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
         if: contains(fromJson('["stable"]'), matrix.version) && (github.event.schedule == '0 1 * * TUE' || contains(fromJson('["workflow_dispatch", "workflow_call"]'), github.event_name))
-        with:
-          name: ${{ steps.generate-release-text.outputs.title }}
-          tag_name: ${{ steps.generate-release-text.outputs.tag }}
-          body_path: ./changelog.md
-          make_latest: ${{ matrix.version == 'stable' }}
-          prerelease: false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: ${{ steps.generate-release-text.outputs.title }}
+          TAG: ${{ steps.generate-release-text.outputs.tag }}
+          BODY_PATH: ./changelog.md
+        run: |
+          gh release create \
+          "${TAG}" \
+          --title "${TITLE}" \
+          -F "${BODY_PATH}" \
+          --latest

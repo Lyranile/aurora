@@ -13,36 +13,28 @@ on:
       - ".github/workflows/scorecard.yml"
   workflow_call:
   workflow_dispatch:
-    inputs:
-      previous_build:
-        description: 'Set to 0 to manually clear rechunking plan'
-        type: choice
-        default: '1'
-        options:
-          - '0'
-          - '1'
 
-permissions:
-  contents: read
-  packages: write
-  id-token: write
-  attestations: write
-  artifact-metadata: write
+permissions: {}
 
 jobs:
   build-image-stable:
     name: Build Stable Images
     uses: ./.github/workflows/reusable-build.yml
-    secrets: inherit
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    secrets:
+      SIGNING_SECRET: ${{ secrets.SIGNING_SECRET }}
     strategy:
       fail-fast: false
       matrix:
         brand_name: ["aurora"]
     with:
-      #kernel_pin: 6.14.11-300.fc42.x86_64 ## This is where kernels get pinned.
       brand_name: ${{ matrix.brand_name }}
       stream_name: stable
-      previous_build: ${{ inputs.previous_build }}
       # Enable ARM when it makes sense
       # architecture: '["aarch64","x86_64"]'
       architecture: '["x86_64"]'
@@ -53,7 +45,6 @@ jobs:
     needs: [build-image-stable]
     permissions:
       contents: write
-    secrets: inherit
     uses: ./.github/workflows/generate-release.yml
     with:
       stream_name: '["stable"]'

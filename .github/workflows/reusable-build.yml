@@ -15,12 +15,6 @@ on:
         description: "The Fedora Version: stable, or latest"
         required: true
         type: string
-      kernel_pin:
-        description: "The full kernel version to pin"
-        type: string
-      previous_build:
-        description: 'Set a reference to a previous build to make updates smaller'
-        type: string
       architecture:
         description: "JSON string of architectures to build, '[aarch64, x86_64]'"
         default: "['x86_64']"
@@ -31,6 +25,9 @@ on:
         required: false
         type: boolean
         default: true
+    secrets:
+      SIGNING_SECRET:
+        required: true
 
 env:
   IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
@@ -44,7 +41,7 @@ permissions: {}
 jobs:
   build_container:
     name: image
-    runs-on: ${{ matrix.architecture == 'x86_64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+    runs-on: ${{ matrix.architecture == 'x86_64' && 'ubuntu-26.04' || 'ubuntu-26.04-arm' }}
     permissions:
       contents: read
       packages: write
@@ -67,34 +64,30 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # FIXME: We need both actions as we run out of space on /var/tmp, however this
+      # will still fail sometimes as even the smallest 72G runners have a
+      # chance of not having /mnt and only 20GB free. Please investigate this
+      # in the future
+
+      - name: Mount BTRFS for podman storage
+        id: container-storage-action
+        uses: ublue-os/container-storage-action@25e05be4948f77746938687877829d15c5038036
+        continue-on-error: true
+        with:
+          mount-opts: compress-force=zstd:2
+          loopback-free: '1'
 
       - name: Free Up Space
         id: remove-unwanted-software
         uses: ublue-os/remove-unwanted-software@695eb75bc387dbcd9685a8e72d23439d8686cba6
 
-      # TODO: remove me when we have a new podman in 26.04 runners
-      # needed because old podman doesn't push layer annotations for
-      # the rpm-ostree rechunker at all
-      - name: Update podman
-        shell: bash
+      - name: Configure containers policy for build
         run: |
-          set -eux
-          # Require the runner is ubuntu-24.04
-          IDV=$(. /usr/lib/os-release && echo ${ID}-${VERSION_ID})
-          test "${IDV}" = "ubuntu-24.04"
-          # resolute is the next release. The azure.archive.ubuntu.com mirror only carries amd64.
-          # Other architectures like arm64 use ports.ubuntu.com/ubuntu-ports.
-          if [ "$(dpkg --print-architecture)" = "amd64" ]; then
-            mirror="http://azure.archive.ubuntu.com/ubuntu"
-          else
-            mirror="http://ports.ubuntu.com/ubuntu-ports"
-          fi
-          echo "deb ${mirror} resolute universe main" | sudo tee /etc/apt/sources.list.d/resolute.list
-          /bin/time -f '%E %C' sudo apt update
-          # skopeo is currently older in resolute for some reason hence --allow-downgrades
-          /bin/time -f '%E %C' sudo apt install -y --allow-downgrades crun/resolute buildah/resolute podman/resolute skopeo/resolute
-          podman --version
+          sudo ./.github/setup-runner-keys.sh
 
       - name: Install Just
         run: |
@@ -104,11 +97,12 @@ jobs:
       # FIXME: Implement retries for stuff like this
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        if: inputs.publish
+        # be careful when upgrading major versions
+        with:
+          cosign-release: 'v3.1.2'
 
       - name: Install ORAS
-        if: inputs.publish
-        uses: oras-project/setup-oras@38de303aac69abb66f3e6255b7198bff35f323e3 # v2.0.0
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
 
       - name: Check Just Syntax
         shell: bash
@@ -123,87 +117,81 @@ jobs:
           MATRIX_STREAM_NAME: ${{ matrix.stream_name }}
           MATRIX_IMAGE_FLAVOR: ${{ matrix.image_flavor }}
         run: |
-          IMAGE_NAME="$(just image_name ${MATRIX_BASE_NAME} ${MATRIX_STREAM_NAME} ${MATRIX_IMAGE_FLAVOR})"
+          IMAGE_NAME="$(just image_name \
+                      --image ${MATRIX_BASE_NAME} \
+                      --tag ${MATRIX_STREAM_NAME} \
+                      --flavor ${MATRIX_IMAGE_FLAVOR})"
+
           echo "IMAGE_NAME=${IMAGE_NAME}" >> $GITHUB_ENV
 
-      - name: DNF Package Cache Setup
+      - name: DNF Package Cache Pull
         shell: bash
-        id: setup-cache
+        id: pull-cache
         env:
           MATRIX_BASE_NAME: ${{ matrix.base_name }}
           MATRIX_STREAM_NAME: ${{ matrix.stream_name }}
           MATRIX_IMAGE_FLAVOR: ${{ matrix.image_flavor }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
-          CACHE="$(just setup-cache "${MATRIX_BASE_NAME}" \
-                            "${MATRIX_STREAM_NAME}" \
-                            "${MATRIX_IMAGE_FLAVOR}" \
-                            "1" \
-                            "${GITHUB_EVENT_NAME}")"
-
-          CACHE_NAME="$(echo "${CACHE}" | cut -d' ' -f 1)"
-          ALLOW_CACHE_WRITE="$(echo "${CACHE}" | cut -d' ' -f 2)"
-
-          echo "cache_name=${CACHE_NAME}" >> "$GITHUB_OUTPUT"
-          echo "allow_cache_write=${ALLOW_CACHE_WRITE}" >> "$GITHUB_OUTPUT"
-
-      - name: Restore DNF package cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        env:
-          CACHE_NAME: ${{ steps.setup-cache.outputs.cache_name }}
-        with:
-          path: /var/tmp/buildah-cache-*
-          key: ${{ runner.os }}-${{ matrix.architecture }}-buildah-${{ env.CACHE_NAME }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.architecture }}-buildah-${{ env.CACHE_NAME }}-
-            ${{ runner.os }}-${{ matrix.architecture }}-buildah-${{ env.CACHE_NAME }}
+          $(command -v just) \
+            setup-cache \
+            --image "${MATRIX_BASE_NAME}" \
+            --tag "${MATRIX_STREAM_NAME}" \
+            --flavor "${MATRIX_IMAGE_FLAVOR}" \
+            --ghcr \
+            --registry "${IMAGE_REGISTRY}" \
+            --pull
 
       - name: Build Image
         id: build-image
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # ghcurl
           MATRIX_BASE_NAME: ${{ matrix.base_name }}
           MATRIX_STREAM_NAME: ${{ matrix.stream_name }}
           MATRIX_IMAGE_FLAVOR: ${{ matrix.image_flavor }}
-          INPUTS_KERNEL_PIN: ${{ inputs.kernel_pin }}
         run: |
-          sudo -E $(command -v just) repo_organization="${{ github.repository_owner }}" \
-                    build-ghcr "${MATRIX_BASE_NAME}" \
-                               "${MATRIX_STREAM_NAME}" \
-                               "${MATRIX_IMAGE_FLAVOR}" \
-                               "${INPUTS_KERNEL_PIN}"
-
-      # https://github.com/actions/cache/issues/1533
-      - name: Hack around permission issue caching
-        shell: bash
-        id: cache-perms
-        run: |
-          sudo chmod 777 --recursive /var/tmp/buildah-cache-0
+          $(command -v just) \
+            repo_organization="${{ github.repository_owner }}" \
+            build \
+            --image "${MATRIX_BASE_NAME}" \
+            --tag "${MATRIX_STREAM_NAME}" \
+            --flavor "${MATRIX_IMAGE_FLAVOR}" \
+            --ghcr \
+            --retry-pull
 
       - name: Write new DNF package cache
-        if: steps.setup-cache.outputs.allow_cache_write == 'true'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        id: push-cache
+        shell: bash
+        if: inputs.publish
         env:
-          CACHE_NAME: ${{ steps.setup-cache.outputs.cache_name }}
-        with:
-          path: /var/tmp/buildah-cache-*
-          key: ${{ runner.os }}-${{ matrix.architecture }}-buildah-${{ env.CACHE_NAME }}-${{ github.run_id }}
+          MATRIX_BASE_NAME: ${{ matrix.base_name }}
+          MATRIX_STREAM_NAME: ${{ matrix.stream_name }}
+          MATRIX_IMAGE_FLAVOR: ${{ matrix.image_flavor }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $(command -v just) \
+            setup-cache \
+            --image "${MATRIX_BASE_NAME}" \
+            --tag "${MATRIX_STREAM_NAME}" \
+            --flavor "${MATRIX_IMAGE_FLAVOR}" \
+            --ghcr \
+            --registry "${IMAGE_REGISTRY}" \
+            --github-event "${GITHUB_EVENT_NAME}" \
+            --push
 
-      - name: Rechunk Image with rpm-ostree
+      - name: Rechunk Image with Chunkah
         id: rechunker
         env:
           MATRIX_BASE_NAME: ${{ matrix.base_name }}
           MATRIX_STREAM_NAME: ${{ matrix.stream_name }}
           MATRIX_IMAGE_FLAVOR: ${{ matrix.image_flavor }}
-          PREVIOUS_BUILD: ${{ github.event_name == 'pull_request' && '0' || (github.event.inputs.previous_build || '1') }}
         run: |
-          sudo -E $(command -v just) rechunk "${MATRIX_BASE_NAME}" \
-                            "${MATRIX_STREAM_NAME}" \
-                            "${MATRIX_IMAGE_FLAVOR}" \
-                            "1" \
-                            "0" \
-                            "${PREVIOUS_BUILD}"
+         $(command -v just) rechunk \
+            --image "${MATRIX_BASE_NAME}" \
+            --tag "${MATRIX_STREAM_NAME}" \
+            --flavor "${MATRIX_IMAGE_FLAVOR}"
 
       - name: Setup Syft
         id: setup-syft
@@ -219,10 +207,11 @@ jobs:
           MATRIX_IMAGE_FLAVOR: ${{ matrix.image_flavor }}
           SYFT_CMD: ${{ steps.setup-syft.outputs.cmd }}
         run: |
-          sudo -E $(command -v just) gen-sbom "${MATRIX_BASE_NAME}" \
-                            "${MATRIX_STREAM_NAME}" \
-                            "${MATRIX_IMAGE_FLAVOR}" \
-                            "${SYFT_CMD}"
+          $(command -v just) gen-sbom \
+            --image "${MATRIX_BASE_NAME}" \
+            --tag "${MATRIX_STREAM_NAME}" \
+            --flavor "${MATRIX_IMAGE_FLAVOR}" \
+            "${SYFT_CMD}"
 
       - name: Secureboot Check
         id: secureboot
@@ -232,9 +221,10 @@ jobs:
           MATRIX_STREAM_NAME: ${{ matrix.stream_name }}
           MATRIX_IMAGE_FLAVOR: ${{ matrix.image_flavor }}
         run: |
-          sudo -E $(command -v just) secureboot "${MATRIX_BASE_NAME}" \
-                            "${MATRIX_STREAM_NAME}" \
-                            "${MATRIX_IMAGE_FLAVOR}"
+         $(command -v just) secureboot \
+            --image "${MATRIX_BASE_NAME}" \
+            --tag "${MATRIX_STREAM_NAME}" \
+            --flavor "${MATRIX_IMAGE_FLAVOR}"
 
       - name: Export to OCI Archive
         if: github.event_name == 'pull_request'
@@ -244,9 +234,10 @@ jobs:
           MATRIX_STREAM_NAME: ${{ matrix.stream_name }}
           MATRIX_IMAGE_FLAVOR: ${{ matrix.image_flavor }}
         run: |
-          sudo -E $(command -v just) export-oci "${MATRIX_BASE_NAME}" \
-                            "${MATRIX_STREAM_NAME}" \
-                            "${MATRIX_IMAGE_FLAVOR}"
+          $(command -v just) export-oci \
+            --image "${MATRIX_BASE_NAME}" \
+            --tag "${MATRIX_STREAM_NAME}" \
+            --flavor "${MATRIX_IMAGE_FLAVOR}"
 
       - name: Upload OCI Archive as Artifact
         if: github.event_name == 'pull_request'
@@ -269,10 +260,16 @@ jobs:
           MATRIX_STREAM_NAME: ${{ matrix.stream_name }}
           MATRIX_IMAGE_FLAVOR: ${{ matrix.image_flavor }}
         run: |
-          sudo -E $(command -v just) disk-image "${MATRIX_BASE_NAME}" \
-                             "${MATRIX_STREAM_NAME}" \
-                             "${MATRIX_IMAGE_FLAVOR}" \
-                             1
+          $(command -v just) load-rootful \
+            --image "${MATRIX_BASE_NAME}" \
+            --tag "${MATRIX_STREAM_NAME}" \
+            --flavor "${MATRIX_IMAGE_FLAVOR}" \
+
+          sudo $(command -v just) disk-image \
+            --image "${MATRIX_BASE_NAME}" \
+            --tag "${MATRIX_STREAM_NAME}" \
+            --flavor "${MATRIX_IMAGE_FLAVOR}" \
+            --ghcr
 
       - name: PR Testing Instructions
         if: github.event_name == 'pull_request'
@@ -292,20 +289,17 @@ jobs:
           MATRIX_BASE_NAME: "${{ matrix.base_name }}"
           MATRIX_STREAM_NAME: "${{ matrix.stream_name }}"
           MATRIX_IMAGE_FLAVOR: "${{ matrix.image_flavor }}"
-          INPUTS_KERNEL_PIN: "${{ inputs.kernel_pin }}"
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_EVENT_NUMBER: ${{ github.event.number }}
         run: |
           alias_tags="$(just generate-build-tags \
-                     "${MATRIX_BASE_NAME}" \
-                     "${MATRIX_STREAM_NAME}" \
-                     "${MATRIX_IMAGE_FLAVOR}" \
-                     "${INPUTS_KERNEL_PIN}" \
-                     "1" \
-                     "$(podman inspect ${IMAGE_NAME}:${MATRIX_STREAM_NAME} | jq -r '.[].Config.Labels["org.opencontainers.image.version"]')" \
-                     "${GITHUB_EVENT_NAME}" \
-                     "${GITHUB_EVENT_NUMBER}")"
+                      --image "${MATRIX_BASE_NAME}" \
+                      --tag "${MATRIX_STREAM_NAME}" \
+                      --flavor "${MATRIX_IMAGE_FLAVOR}" \
+                      --ghcr \
+                      --github-event "${GITHUB_EVENT_NAME}" \
+                      --github-number "${GITHUB_EVENT_NUMBER}")"
 
           echo "Tags for this Action..."
           echo "$alias_tags"
@@ -320,9 +314,10 @@ jobs:
           ALIAS_TAGS: ${{ steps.generate-tags.outputs.alias_tags }}
         run: |
           set -eoux pipefail
-          sudo -E $(command -v just) tag-images "${IMAGE_NAME}" \
-                          "${MATRIX_STREAM_NAME}" \
-                          "${ALIAS_TAGS}"
+          $(command -v just) tag-images \
+            --image "${IMAGE_NAME}" \
+            --default-tag "${MATRIX_STREAM_NAME}" \
+            --tags "${ALIAS_TAGS}"
 
       - name: Login to GitHub Container Registry
         if: inputs.publish
@@ -330,8 +325,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
         run: |
-          echo "${GITHUB_TOKEN}" | podman login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-          echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          just login-registry podman ghcr.io
+          # cosign gets credentials from docker
+          just login-registry docker ghcr.io
 
       # Workaround bug where capital letters in your GitHub username make it impossible to push to GHCR.
       # https://github.com/macbre/push-to-ghcr/issues/12
@@ -355,17 +351,22 @@ jobs:
         run: |
             set -euox pipefail
 
-            sudo -E $(command -v just) push-image \
-                     "${MATRIX_BASE_NAME}" \
-                     "${MATRIX_STREAM_NAME}" \
-                     "${MATRIX_IMAGE_FLAVOR}" \
-                     "1" \
-                     "${IMAGE_REGISTRY}" \
-                     "1" \
-                     "${TEMP_PUSH_TAG}"
+            $(command -v just) push-image \
+              --image "${MATRIX_BASE_NAME}" \
+              --tag "${MATRIX_STREAM_NAME}" \
+              --flavor "${MATRIX_IMAGE_FLAVOR}" \
+              --ghcr \
+              --registry "${IMAGE_REGISTRY}" \
+              --temp-push \
+              --temp-push-tag "${TEMP_PUSH_TAG}"
 
             digest=$(< /tmp/digestfile)
             echo "digest=${digest}" >> $GITHUB_OUTPUT
+
+            echo '## Temporary digest'>> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "${digest}" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Sign container image
         if: inputs.publish
@@ -390,12 +391,20 @@ jobs:
         run: |
             set -euox pipefail
 
-            sudo -E $(command -v just) push-image \
-                     "${MATRIX_BASE_NAME}" \
-                     "${MATRIX_STREAM_NAME}" \
-                     "${MATRIX_IMAGE_FLAVOR}" \
-                     "1" \
-                     "${IMAGE_REGISTRY}"
+            $(command -v just) push-image \
+              --image "${MATRIX_BASE_NAME}" \
+              --tag "${MATRIX_STREAM_NAME}" \
+              --flavor "${MATRIX_IMAGE_FLAVOR}" \
+              --ghcr \
+              --registry "${IMAGE_REGISTRY}"
+
+            digest=$(< /tmp/digestfile)
+            echo "digest=${digest}" >> $GITHUB_OUTPUT
+
+            echo '## Production digest'>> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "${digest}" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Login to GitHub Container Registry with ORAS
         if: inputs.publish
@@ -403,7 +412,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
         run: |
-          echo "${GITHUB_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          just login-registry oras ghcr.io
 
       - name: Upload SBOM
         if: inputs.publish
@@ -438,7 +447,7 @@ jobs:
 
       - name: Attestation
         if: inputs.publish
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 #v4.1.0
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-name: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.pre-push.outputs.digest }}
@@ -456,7 +465,7 @@ jobs:
   check:
     name: Check all ${{ matrix.stream_name }} builds successful
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     needs: [build_container]
     steps:
       - name: Check Jobs
