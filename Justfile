@@ -158,8 +158,8 @@ build $image=default_image $tag=default_tag $flavor=default_flavor $rechunk="fal
       case "${tag}" in
               stable)
                   if [[ "${ARCH}" == "x86_64" ]]; then
-                      # https://github.com/openzfs/zfs/issues/18760
-                      kernel_pin="7.0.12-201.fc44.x86_64"
+                      # <Here is a link why we have it pinned>
+                      kernel_pin=""
                   elif [[ "${ARCH}" == "aarch64" ]]; then
                       kernel_pin=""
                   fi
@@ -345,7 +345,7 @@ rechunk $image=default_image $tag=default_tag $flavor=default_flavor:
     build \
     --verbose \
     --compressed \
-    --max-layers 128 \
+    --max-layers 256 \
     --prune /sysroot/ \
     --label ostree.commit- --label ostree.final-diffid- \
     --config /chunkah-config.json \
@@ -902,8 +902,9 @@ push-image $image=default_image $tag=default_tag $flavor=default_flavor $ghcr="f
     PUSH_CMD_ARGS+=("--digestfile=/tmp/digestfile")
     PUSH_CMD_ARGS+=("--compression-format=zstd")
     PUSH_CMD_ARGS+=("--compression-level=3")
-    PUSH_CMD_ARGS+=("--retry-delay=30s")
-    PUSH_CMD_ARGS+=("--retry=5")
+    # TODO; This has failed already once, investigate if this actually does something and we need to use the retry function
+    PUSH_CMD_ARGS+=("--retry-delay=60s")
+    PUSH_CMD_ARGS+=("--retry=10")
 
     PUSH_CMD=""${PODMAN}" push "${PUSH_CMD_ARGS[@]}""
 

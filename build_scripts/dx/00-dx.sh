@@ -4,6 +4,9 @@ echo "::group:: ===$(basename "$0")==="
 
 set -ouex pipefail
 
+# Apply IP Forwarding before installing Docker to prevent messing with LXC networking
+sysctl -p
+
 # Load secure COPR helpers
 # shellcheck source=build_scripts/shared/copr-helpers.sh
 source /ctx/build_scripts/shared/copr-helpers.sh
@@ -102,25 +105,19 @@ echo "Installing DX COPR packages with isolated repo enablement..."
 copr_install_isolated "karmab/kcli" "kcli"
 copr_install_isolated "ublue-os/packages" "ublue-os-libvirt-workarounds"
 
-# DX packages to exclude - common to all versions
-EXCLUDED_PACKAGES=()
+rsync -rvK /ctx/system_files/dx/ /
 
-# Version-specific package exclusions for DX
-case "$FEDORA_MAJOR_VERSION" in
-    43)
-        EXCLUDED_PACKAGES+=()
-        ;;
-esac
+# Load iptable_nat module for docker-in-docker.
+# See:
+#   - https://github.com/ublue-os/bluefin/issues/2365
+#   - https://github.com/devcontainers/features/issues/1235
+mkdir -p /etc/modules-load.d
+tee /etc/modules-load.d/ip_tables.conf <<EOF
+iptable_nat
+EOF
 
-# Remove excluded packages if they are installed
-if [[ "${#EXCLUDED_PACKAGES[@]}" -gt 0 ]]; then
-    readarray -t INSTALLED_EXCLUDED < <(rpm -qa --queryformat='%{NAME}\n' "${EXCLUDED_PACKAGES[@]}" 2>/dev/null || true)
-    if [[ "${#INSTALLED_EXCLUDED[@]}" -gt 0 ]]; then
-        dnf5 -y remove "${INSTALLED_EXCLUDED[@]}"
-    else
-        echo "No excluded packages found to remove."
-    fi
-fi
+# Branding Changes
+echo "Variant=Developer Experience" >> /usr/share/kde-settings/kde-profile/default/xdg/kcm-about-distrorc
 
 # Enable DX services
 if rpm -q docker-ce >/dev/null; then

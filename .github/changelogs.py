@@ -55,8 +55,12 @@ From previous `{target}` version `{prev}` there have been the following changes.
 | **Kernel** | {pkgrel:kernel} |
 | **KDE** | {pkgrel:plasma-desktop} |
 | **Mesa** | {pkgrel:mesa-filesystem} |
-| **Podman** | {pkgrel:podman} |
 | **Nvidia** | {pkgrel:nvidia-driver} |
+| **Podman** | {pkgrel:podman} |
+| **Bootc** | {pkgrel:bootc} |
+| **Flatpak** | {pkgrel:flatpak} |
+| **OSTree** | {pkgrel:ostree} |
+| **RPM-OSTree** | {pkgrel:rpm-ostree} |
 
 ### Major DX packages
 | Name | Version |
@@ -77,6 +81,9 @@ sudo bootc switch --enforce-container-sigpolicy ghcr.io/ublue-os/$IMAGE_NAME:{ta
 
 # For this Specific Image:
 sudo bootc switch --enforce-container-sigpolicy ghcr.io/ublue-os/$IMAGE_NAME:{curr}
+
+# For other operations like changing streams/picking a specific date:
+ujust rebase-helper
 ```
 
 ### Documentation
