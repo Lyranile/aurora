@@ -28,9 +28,9 @@ default_tag := "latest"
 default_flavor := "main"
 
 # Build Containers
-chunkah := shell("yq -r \".images[] | select(.name == \\\"chunkah\\\") | \\\"\\\\(.image)@\\\\(.digest)\\\"\" image-versions.yml")
-common := shell("yq -r \".images[] | select(.name == \\\"common\\\") | \\\"\\\\(.image)@\\\\(.digest)\\\"\" image-versions.yml")
-brew := shell("yq -r \".images[] | select(.name == \\\"brew\\\") | \\\"\\\\(.image)@\\\\(.digest)\\\"\" image-versions.yml")
+chunkah := shell("yq -r \".images[] | select(.name == \\\"chunkah\\\") | \\\"\\\\(.image):\\(.tag)@\\\\(.digest)\\\"\" image-versions.yml")
+common := shell("yq -r \".images[] | select(.name == \\\"common\\\") | \\\"\\\\(.image):\\(.tag)@\\\\(.digest)\\\"\" image-versions.yml")
+brew := shell("yq -r \".images[] | select(.name == \\\"brew\\\") | \\\"\\\\(.image):\\(.tag)@\\\\(.digest)\\\"\" image-versions.yml")
 
 export SUDO_DISPLAY := if `if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then echo true; fi` == "true" { "true" } else { "false" }
 export SUDOIF := if `id -u` == "0" { "" } else { "sudo" }
@@ -876,7 +876,7 @@ disk-image $image=default_image $tag=default_tag $flavor=default_flavor $ghcr="f
     if [[ "${backend}" == "ostree" ]]; then
       BOOTC_INSTALL_ARGS+=("--bootloader grub")
     else
-      BOOTC_INSTALL_ARGS+=("--bootloader systemd" "--composefs-backend")
+      BOOTC_INSTALL_ARGS+=("--bootloader grub" "--composefs-backend")
     fi
 
     {{ just }} bootc --image "${image}" --tag "${tag}" --flavor "${flavor}" install to-disk -- "${BOOTC_INSTALL_ARGS[@]}"
