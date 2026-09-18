@@ -5,7 +5,7 @@ export base_image_name := env("BASE_IMAGE_NAME", "kinoite")
 
 stable_version := "44"
 latest_version := "44"
-testing_version := "44"
+testing_version := "45"
 
 images := '(
     [aurora]=aurora
@@ -744,7 +744,7 @@ gen-sbom $image=default_image $tag=default_tag $flavor=default_flavor $syft_cmd=
 
     SBOM="${OUT_DIR}/sbom.json"
 
-    ${syft_cmd} --source-name "${image_name}:${tag}" "${OUT_DIR}" -o syft-json=${SBOM}
+    ${syft_cmd} --verbose --source-name "${image_name}:${tag}" "${OUT_DIR}" -o syft-json=${SBOM}
     du -sh "${SBOM}"
 
     rm -rf "${ROOTFS}"
